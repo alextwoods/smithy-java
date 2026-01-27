@@ -37,6 +37,7 @@ import software.amazon.awssdk.http.SdkHttpFullResponse;
 import software.amazon.awssdk.protocols.json.AwsJsonProtocol;
 import software.amazon.awssdk.protocols.json.AwsJsonProtocolFactory;
 import software.amazon.awssdk.protocols.json.JsonOperationMetadata;
+import software.amazon.awssdk.protocols.json.internal.unmarshall.SdkClientJsonProtocolAdvancedOption;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
 import software.amazon.awssdk.services.dynamodb.transform.PutItemRequestMarshaller;
@@ -180,6 +181,7 @@ public class DynamoDBSerde {
                     .clientConfiguration(SdkClientConfiguration
                             .builder()
                             .lazyOption(SdkClientOption.ENDPOINT, (c) -> endpoint)
+                            .option(SdkClientJsonProtocolAdvancedOption.ENABLE_FAST_UNMARSHALLER, true)
                             .build())
                     .protocolVersion("1.0")
                     .build();
@@ -202,9 +204,14 @@ public class DynamoDBSerde {
 
         @Setup(Level.Iteration)
         public void setup() throws Exception {
+            URI endpoint = new URI("https://dynamodb.us-east-1.amazonaws.com");
             protocolFactory = AwsJsonProtocolFactory.builder()
                     .protocol(AwsJsonProtocol.AWS_JSON)
-                    .protocolVersion("1.0")
+                    .clientConfiguration(SdkClientConfiguration
+                            .builder()
+                            .lazyOption(SdkClientOption.ENDPOINT, (c) -> endpoint)
+                            .option(SdkClientJsonProtocolAdvancedOption.ENABLE_FAST_UNMARSHALLER, true)
+                            .build())
                     .build();
             
             JsonOperationMetadata operationMetadata = JsonOperationMetadata.builder()
