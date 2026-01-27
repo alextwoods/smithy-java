@@ -19,9 +19,6 @@ include(":dynamic-schemas")
 include(":io")
 include(":logging")
 
-// CLI
-include(":cli")
-
 // Common components
 include(":auth-api")
 include(":framework-errors")

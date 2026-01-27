@@ -16,7 +16,6 @@ dependencies {
 
     // AWS SDK for Java V2 for benchmarking comparison
     jmh("software.amazon.awssdk:dynamodb:$awsSdkVersion")
-    jmh("com.fasterxml.jackson.core:jackson-databind:2.18.2")
 }
 
 // Add generated Java sources to the main sourceset

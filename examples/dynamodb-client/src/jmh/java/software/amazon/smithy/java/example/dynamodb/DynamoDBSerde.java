@@ -5,8 +5,8 @@
 
 package software.amazon.smithy.java.example.dynamodb;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.ByteBuffer;
@@ -19,6 +19,7 @@ import java.util.Random;
 import java.util.concurrent.TimeUnit;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.BenchmarkMode;
+import org.openjdk.jmh.annotations.Level;
 import org.openjdk.jmh.annotations.Mode;
 import org.openjdk.jmh.annotations.OutputTimeUnit;
 import org.openjdk.jmh.annotations.Param;
@@ -27,10 +28,18 @@ import org.openjdk.jmh.annotations.Setup;
 import org.openjdk.jmh.annotations.State;
 import org.openjdk.jmh.infra.Blackhole;
 import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
+import software.amazon.awssdk.core.client.config.SdkClientConfiguration;
+import software.amazon.awssdk.core.client.config.SdkClientOption;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.http.AbortableInputStream;
+import software.amazon.awssdk.http.SdkHttpFullRequest;
+import software.amazon.awssdk.http.SdkHttpFullResponse;
+import software.amazon.awssdk.protocols.json.AwsJsonProtocol;
+import software.amazon.awssdk.protocols.json.AwsJsonProtocolFactory;
+import software.amazon.awssdk.protocols.json.JsonOperationMetadata;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
 import software.amazon.awssdk.services.dynamodb.model.PutItemRequest;
-import software.amazon.awssdk.services.dynamodb.model.PutItemResponse;
+import software.amazon.awssdk.services.dynamodb.transform.PutItemRequestMarshaller;
 import software.amazon.smithy.java.aws.client.awsjson.AwsJson1Protocol;
 import software.amazon.smithy.java.context.Context;
 import software.amazon.smithy.java.core.schema.ApiOperation;
@@ -47,52 +56,74 @@ import software.amazon.smithy.java.io.datastream.DataStream;
 import software.amazon.smithy.java.json.JsonCodec;
 import software.amazon.smithy.model.shapes.ShapeId;
 
-@State(Scope.Benchmark)
+@State(Scope.Thread)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 @BenchmarkMode(Mode.AverageTime)
 public class DynamoDBSerde {
 
     private static final JsonCodec CODEC = JsonCodec.builder().build();
 
-    @Benchmark
+    // @Benchmark
     public void putItem(PutItemState s, Blackhole bh) {
         var request = s.protocol.createRequest(s.operation, s.req, s.context, s.endpoint);
         bh.consume(request);
     }
 
-    @Benchmark
+    // @Benchmark
     public void getItem(GetItemState s, Blackhole bh) {
         var resp = fullResponse(s.testItem.utf8);
         var result = s.protocol.deserializeResponse(s.operation, s.context, s.operation.errorRegistry(), s.req, resp);
         bh.consume(result);
     }
 
-    @Benchmark
+    // @Benchmark
     public void putItemV2(PutItemV2State s, Blackhole bh) throws Exception {
-        // Serialize PutItemRequest to JSON using the SDK's approach
-        // We'll manually build the JSON structure that matches DynamoDB's format
-        Map<String, Object> requestMap = Map.of(
-                "TableName", s.req.tableName(),
-                "Item", convertToJsonMap(s.req.item())
-        );
-        byte[] json = s.objectMapper.writeValueAsBytes(requestMap);
-        bh.consume(json);
+        // Use the actual AWS SDK V2 marshaller
+        PutItemRequestMarshaller marshaller = new PutItemRequestMarshaller(s.protocolFactory);
+        SdkHttpFullRequest marshalledRequest = marshaller.marshall(s.req);
+        bh.consume(marshalledRequest);
     }
 
     @Benchmark
     public void getItemV2(GetItemV2State s, Blackhole bh) throws Exception {
-        // Deserialize JSON to GetItemResponse
-        // Parse the JSON and reconstruct the response
-        @SuppressWarnings("unchecked")
-        Map<String, Object> responseMap = s.objectMapper.readValue(s.jsonBytes, Map.class);
-        @SuppressWarnings("unchecked")
-        Map<String, Map<String, Object>> itemMap = (Map<String, Map<String, Object>>) responseMap.get("Item");
-        Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> item = convertFromJsonMap(itemMap);
-        GetItemResponse response = GetItemResponse.builder().item(item).build();
+        // Use the actual AWS SDK V2 response handler
+        s.httpResponse.content().ifPresent(c -> {
+            try {
+                c.reset();
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+        GetItemResponse response = s.responseHandler.handle(s.httpResponse, s.executionAttributes);
         bh.consume(response);
     }
 
-    @State(Scope.Benchmark)
+    public static void main(String[] args) throws  Exception {
+        System.out.println("\n\n===================");
+        GetItemV2State s = new GetItemV2State();
+        s.testItem = TestItemUnmarshallingV2.HUGE;
+        s.setup();
+        GetItemResponse response = s.responseHandler.handle(s.httpResponse, s.executionAttributes);
+        System.out.println("Response: \n" + response + "\n---------------");
+
+        PutItemV2State s2 = new PutItemV2State();
+        s2.testItem = TestItemV2.HUGE;
+        s2.setup();
+
+        PutItemRequestMarshaller marshaller = new PutItemRequestMarshaller(s2.protocolFactory);
+        SdkHttpFullRequest marshalledRequest = marshaller.marshall(s2.req);
+        System.out.println(marshalledRequest);
+        marshalledRequest.contentStreamProvider().ifPresent(c -> {
+            try {
+                byte[] body = c.newStream().readAllBytes();
+                System.out.println("Marshalled body: " + new String(body, StandardCharsets.UTF_8) + "\n--------");
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    @State(Scope.Thread)
     public static class PutItemState {
         @Param({"TINY", "SMALL", "HUGE"})
         private TestItem testItem;
@@ -103,7 +134,7 @@ public class DynamoDBSerde {
         PutItemInput req;
         Context context = Context.create();
 
-        @Setup
+        @Setup(Level.Iteration)
         public void setup() throws URISyntaxException {
             endpoint = new URI("https://dynamodb.us-east-1.amazonaws.com");
             operation = PutItem.instance();
@@ -112,7 +143,7 @@ public class DynamoDBSerde {
         }
     }
 
-    @State(Scope.Benchmark)
+    @State(Scope.Thread)
     public static class GetItemState {
         @Param({"TINY", "SMALL", "HUGE"})
         private TestItemUnmarshalling testItem;
@@ -123,7 +154,7 @@ public class DynamoDBSerde {
         AwsJson1Protocol protocol;
         HttpRequest req;
 
-        @Setup
+        @Setup(Level.Iteration)
         public void setup() throws URISyntaxException {
             // This isn't actually used, but needed for the protocol implementation.
             endpoint = new URI("https://dynamodb.us-east-1.amazonaws.com");
@@ -133,17 +164,25 @@ public class DynamoDBSerde {
         }
     }
 
-    @State(Scope.Benchmark)
+    @State(Scope.Thread)
     public static class PutItemV2State {
         @Param({"TINY", "SMALL", "HUGE"})
         private TestItemV2 testItem;
 
-        ObjectMapper objectMapper;
+        AwsJsonProtocolFactory protocolFactory;
         PutItemRequest req;
 
-        @Setup
-        public void setup() {
-            objectMapper = new ObjectMapper();
+        @Setup(Level.Iteration)
+        public void setup() throws URISyntaxException {
+            URI endpoint = new URI("https://dynamodb.us-east-1.amazonaws.com");
+            protocolFactory = AwsJsonProtocolFactory.builder()
+                    .protocol(AwsJsonProtocol.AWS_JSON)
+                    .clientConfiguration(SdkClientConfiguration
+                            .builder()
+                            .lazyOption(SdkClientOption.ENDPOINT, (c) -> endpoint)
+                            .build())
+                    .protocolVersion("1.0")
+                    .build();
             req = PutItemRequest.builder()
                     .tableName("a")
                     .item(testItem.getValue())
@@ -151,18 +190,42 @@ public class DynamoDBSerde {
         }
     }
 
-    @State(Scope.Benchmark)
+    @State(Scope.Thread)
     public static class GetItemV2State {
         @Param({"TINY", "SMALL", "HUGE"})
         private TestItemUnmarshallingV2 testItem;
 
-        ObjectMapper objectMapper;
-        byte[] jsonBytes;
+        AwsJsonProtocolFactory protocolFactory;
+        software.amazon.awssdk.core.http.HttpResponseHandler<GetItemResponse> responseHandler;
+        SdkHttpFullResponse httpResponse;
+        ExecutionAttributes executionAttributes;
 
-        @Setup
+        @Setup(Level.Iteration)
         public void setup() throws Exception {
-            objectMapper = new ObjectMapper();
-            jsonBytes = testItem.utf8();
+            protocolFactory = AwsJsonProtocolFactory.builder()
+                    .protocol(AwsJsonProtocol.AWS_JSON)
+                    .protocolVersion("1.0")
+                    .build();
+            
+            JsonOperationMetadata operationMetadata = JsonOperationMetadata.builder()
+                    .hasStreamingSuccessResponse(false)
+                    .isPayloadJson(true)
+                    .build();
+            
+            responseHandler = protocolFactory.createResponseHandler(
+                    operationMetadata,
+                    GetItemResponse::builder);
+            
+            // Create HTTP response with the JSON bytes
+            AbortableInputStream content = AbortableInputStream.create(
+                    new ByteArrayInputStream(testItem.utf8()));
+
+            httpResponse = SdkHttpFullResponse.builder()
+                    .statusCode(200)
+                    .content(content)
+                    .build();
+            
+            executionAttributes = new ExecutionAttributes();
         }
     }
 
@@ -232,9 +295,9 @@ public class DynamoDBSerde {
         private byte[] utf8;
 
         static {
-            TINY.utf8 = toUtf8ByteArrayV2(TestItemV2.TINY.av);
-            SMALL.utf8 = toUtf8ByteArrayV2(TestItemV2.SMALL.av);
-            HUGE.utf8 = toUtf8ByteArrayV2(TestItemV2.HUGE.av);
+            TINY.utf8 = toUtf8ByteArray(TestItem.TINY.av);
+            SMALL.utf8 = toUtf8ByteArray(TestItem.SMALL.av);
+            HUGE.utf8 = toUtf8ByteArray(TestItem.HUGE.av);
         }
 
         public byte[] utf8() {
@@ -246,120 +309,6 @@ public class DynamoDBSerde {
         return CODEC.serializeToString(GetItemOutput.builder().item(item).build()).getBytes(StandardCharsets.UTF_8);
     }
 
-    private static byte[] toUtf8ByteArrayV2(Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> item) {
-        // Create a simple JSON representation for GetItemResponse
-        GetItemResponse response = GetItemResponse.builder().item(item).build();
-        
-        // Use Jackson or simple string building to serialize
-        // For benchmark purposes, we'll create a minimal JSON structure
-        StringBuilder json = new StringBuilder();
-        json.append("{\"Item\":");
-        json.append(serializeItemToJsonV2(item));
-        json.append("}");
-        
-        return json.toString().getBytes(StandardCharsets.UTF_8);
-    }
-
-    private static String serializeItemToJsonV2(Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> item) {
-        StringBuilder json = new StringBuilder();
-        json.append("{");
-        boolean first = true;
-        for (Map.Entry<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> entry : item.entrySet()) {
-            if (!first) json.append(",");
-            first = false;
-            json.append("\"").append(entry.getKey()).append("\":");
-            json.append(serializeAttributeValueToJsonV2(entry.getValue()));
-        }
-        json.append("}");
-        return json.toString();
-    }
-
-    private static String serializeAttributeValueToJsonV2(software.amazon.awssdk.services.dynamodb.model.AttributeValue av) {
-        StringBuilder json = new StringBuilder();
-        json.append("{");
-        if (av.s() != null) {
-            json.append("\"S\":\"").append(av.s()).append("\"");
-        } else if (av.b() != null) {
-            json.append("\"B\":\"").append(java.util.Base64.getEncoder().encodeToString(av.b().asByteArray())).append("\"");
-        } else if (av.l() != null && !av.l().isEmpty()) {
-            json.append("\"L\":[");
-            boolean first = true;
-            for (software.amazon.awssdk.services.dynamodb.model.AttributeValue item : av.l()) {
-                if (!first) json.append(",");
-                first = false;
-                json.append(serializeAttributeValueToJsonV2(item));
-            }
-            json.append("]");
-        } else if (av.m() != null && !av.m().isEmpty()) {
-            json.append("\"M\":");
-            json.append(serializeItemToJsonV2(av.m()));
-        }
-        json.append("}");
-        return json.toString();
-    }
-
-    private static Map<String, Object> convertToJsonMap(
-            Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> item) {
-        Map<String, Object> result = new java.util.HashMap<>();
-        for (Map.Entry<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> entry : item.entrySet()) {
-            result.put(entry.getKey(), convertAttributeValueToJsonMap(entry.getValue()));
-        }
-        return result;
-    }
-
-    private static Map<String, Object> convertAttributeValueToJsonMap(
-            software.amazon.awssdk.services.dynamodb.model.AttributeValue av) {
-        Map<String, Object> result = new java.util.HashMap<>();
-        if (av.s() != null) {
-            result.put("S", av.s());
-        } else if (av.b() != null) {
-            result.put("B", java.util.Base64.getEncoder().encodeToString(av.b().asByteArray()));
-        } else if (av.l() != null) {
-            List<Map<String, Object>> list = new java.util.ArrayList<>();
-            for (software.amazon.awssdk.services.dynamodb.model.AttributeValue item : av.l()) {
-                list.add(convertAttributeValueToJsonMap(item));
-            }
-            result.put("L", list);
-        } else if (av.m() != null) {
-            result.put("M", convertToJsonMap(av.m()));
-        }
-        return result;
-    }
-
-    private static Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> convertFromJsonMap(
-            Map<String, Map<String, Object>> itemMap) {
-        Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue> result = new java.util.HashMap<>();
-        for (Map.Entry<String, Map<String, Object>> entry : itemMap.entrySet()) {
-            result.put(entry.getKey(), convertAttributeValueFromJsonMap(entry.getValue()));
-        }
-        return result;
-    }
-
-    @SuppressWarnings("unchecked")
-    private static software.amazon.awssdk.services.dynamodb.model.AttributeValue convertAttributeValueFromJsonMap(
-            Map<String, Object> avMap) {
-        software.amazon.awssdk.services.dynamodb.model.AttributeValue.Builder builder =
-                software.amazon.awssdk.services.dynamodb.model.AttributeValue.builder();
-        
-        if (avMap.containsKey("S")) {
-            builder.s((String) avMap.get("S"));
-        } else if (avMap.containsKey("B")) {
-            String base64 = (String) avMap.get("B");
-            builder.b(SdkBytes.fromByteArray(java.util.Base64.getDecoder().decode(base64)));
-        } else if (avMap.containsKey("L")) {
-            List<Map<String, Object>> list = (List<Map<String, Object>>) avMap.get("L");
-            List<software.amazon.awssdk.services.dynamodb.model.AttributeValue> avList = new java.util.ArrayList<>();
-            for (Map<String, Object> item : list) {
-                avList.add(convertAttributeValueFromJsonMap(item));
-            }
-            builder.l(avList);
-        } else if (avMap.containsKey("M")) {
-            Map<String, Map<String, Object>> map = (Map<String, Map<String, Object>>) avMap.get("M");
-            builder.m(convertFromJsonMap(map));
-        }
-        
-        return builder.build();
-    }
 
     private HttpResponse fullResponse(byte[] itemBytes) {
         return HttpResponse.builder()

@@ -45,4 +45,25 @@ Run specific benchmarks:
 ./gradlew :examples:dynamodb-client:jmh -Pjmh.includes=".*putItemV2|.*getItemV2"
 ```
 
-The benchmarks use Jackson ObjectMapper for AWS SDK V2 serialization/deserialization to match the SDK's internal JSON processing approach.
+The V2 benchmarks use the AWS SDK's actual `PutItemRequestMarshaller` and protocol factory response handlers to provide an accurate comparison of the SDK's internal marshalling/unmarshalling performance.
+
+
+To actually run:
+
+./gradlew :examples:dynamodb-client:jmhJar
+
+```
+java -jar /Users/alexwoo/smithy/smithy-java/examples/dynamodb-client/build/libs/dynamodb-client-0.0.3-jmh.jar
+```
+
+```
+scp -i "benchmark-ec2.pem" /Users/alexwoo/smithy/smithy-java/examples/dynamodb-client/build/libs/dynamodb-client-0.0.3-jmh.jar ec2-user@ec2-54-215-237-240.us-west-1.compute.amazonaws.com:~/
+
+```
+
+
+```
+java -Xms2g -Xmx2g -XX:+UseG1GC -jar dynamodb-client-0.0.3-jmh.jar DynamoDBSerde -w 1s -r 3s -f 4
+```
+
+
