@@ -63,20 +63,20 @@ public class DynamoDBSerde {
 
     private static final JsonCodec CODEC = JsonCodec.builder().build();
 
-    // @Benchmark
+    @Benchmark
     public void putItem(PutItemState s, Blackhole bh) {
         var request = s.protocol.createRequest(s.operation, s.req, s.context, s.endpoint);
         bh.consume(request);
     }
 
-    // @Benchmark
+    @Benchmark
     public void getItem(GetItemState s, Blackhole bh) {
         var resp = fullResponse(s.testItem.utf8);
         var result = s.protocol.deserializeResponse(s.operation, s.context, s.operation.errorRegistry(), s.req, resp);
         bh.consume(result);
     }
 
-    // @Benchmark
+    @Benchmark
     public void putItemV2(PutItemV2State s, Blackhole bh) throws Exception {
         // Use the actual AWS SDK V2 marshaller
         PutItemRequestMarshaller marshaller = new PutItemRequestMarshaller(s.protocolFactory);
